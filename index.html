@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catat transaksi</title>
+<style>
+:root{--bg:#f3f5f2;--ink:#1b2b26;--muted:#5d6b66;--line:#d3dad6;--accent:#0f5c4a;--warn:#a4570a;--paper:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#111a17;--ink:#e6eeea;--muted:#93a39c;--line:#2b3b35;--accent:#4cc3a1;--warn:#e8a35a;--paper:#18241f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:520px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.5rem;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 16px}
+label{display:block;font-size:.85rem;color:var(--muted);margin:12px 0 4px}
+input,select{width:100%;padding:10px 12px;font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:6px}
+input:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{width:100%;margin-top:20px;padding:12px;font:inherit;font-weight:600;color:#fff;background:var(--accent);border:0;border-radius:6px;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.warn{color:var(--warn);font-size:.85rem;margin:8px 0 0}
+summary{cursor:pointer;color:var(--accent);margin:8px 0}
+pre{white-space:pre-wrap;font-size:.8rem;background:var(--paper);border:1px solid var(--line);border-radius:6px;padding:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Catat transaksi</h1>
+<p class="sub">Unggah screenshot bukti transfer atau QRIS. Dibaca langsung di perangkatmu, tanpa AI dan tanpa API.</p>
+
+<details id="set"><summary>Pengaturan</summary>
+<label for="url">URL Apps Script</label>
+<input id="url" placeholder="https://docs.google.com/spreadsheets/d/1qCkv3exGeDrYAytXUHfc6eaXVcHpIYRhHW5ouLXoNB8/edit?usp=sharing">
+<label for="tok">Kode rahasia</label>
+<input id="tok" type="password">
+</details>
+
+<label for="img">Screenshot bukti transaksi</label>
+<input id="img" type="file" accept="image/*">
+<p id="st" class="sub" role="status"></p>
+
+<div id="form" hidden></div>
+<details id="raw" hidden><summary>Teks hasil baca (untuk pengecekan)</summary><pre id="rt"></pre></details>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+const KAT=["Makan & Minum","Transportasi","Belanja","Tagihan & Langganan","Pendidikan","Tempat Tinggal","Hiburan","Kesehatan","Patungan","Transfer Pribadi","Pemasukan","Lainnya"];
+const F=[["tanggal","Tanggal (YYYY-MM-DD)"],["jam","Jam"],["nominal","Nominal (Rp)"],["biaya_admin","Biaya admin"],["nama_lawan","Penerima / pengirim"],["bank_asal","Bank asal"],["bank_tujuan","Bank tujuan"],["acquirer","Acquirer"],["no_referensi","No. referensi"]];
+const BULAN={jan:1,feb:2,mar:3,apr:4,mei:5,may:5,jun:6,jul:7,agu:8,aug:8,ags:8,sep:9,okt:10,oct:10,nov:11,des:12,dec:12};
+const $=id=>document.getElementById(id);
+const store={get:k=>{try{return localStorage.getItem(k)||""}catch(e){return ""}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+let kyk=0;
+
+$("url").value=store.get("url"); $("tok").value=store.get("tok");
+$("url").onchange=()=>store.set("url",$("url").value.trim());
+$("tok").onchange=()=>store.set("tok",$("tok").value);
+
+$("form").innerHTML='<div class="grid">'+F.map(([k,l])=>'<div><label for="f_'+k+'">'+l+'</label><input id="f_'+k+'"></div>').join("")+
+'<div><label for="f_jenis">Jenis</label><select id="f_jenis"><option>qris</option><option>transfer</option><option>topup</option><option>va</option><option>lainnya</option></select></div>'+
+'<div><label for="f_tipe">Tipe</label><select id="f_tipe"><option>keluar</option><option>masuk</option></select></div>'+
+'<div><label for="f_kategori">Kategori</label><select id="f_kategori"><option value="">Pilih kategori</option></select></div></div>'+
+'<p id="warn" class="warn"></p><button id="save">Simpan ke Sheets</button>';
+KAT.forEach(k=>$("f_kategori").add(new Option(k,k)));
+
+const angka=s=>Number(s.replace(/[^\d.,]/g,"").replace(/[.,]+$/,"").replace(/[.,]\d{2}$/,"").replace(/[.,]/g,""));
+
+function parse(t){
+  const g=re=>{const m=t.match(re);return m?m[1].trim():""};
+  const L=t.split("\n").map(x=>x.trim()).filter(Boolean);
+  const d={};
+  const am=t.match(/(?:IDR|Rp)\s*(\d[\d.,]*)/i);
+  d.nominal=am?angka(am[1]):"";
+  const dt=t.match(/(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\D{0,6}(\d{1,2})[:.](\d{2})[:.](\d{2})/);
+  const bln=dt&&BULAN[dt[2].slice(0,3).toLowerCase()];
+  const p2=n=>String(n).padStart(2,"0");
+  d.tanggal=bln?dt[3]+"-"+p2(bln)+"-"+p2(dt[1]):"";
+  d.jam=bln?p2(dt[4])+":"+dt[5]+":"+dt[6]:"";
+  d.nama_lawan=g(/(?:payment to|beneficiary name|nama penerima)\s*[:\-]?\s*(.+)/i);
+  if(!d.nama_lawan){const i=L.findIndex(x=>/^tujuan$/i.test(x));if(i>=0)d.nama_lawan=L[i+1]||""}
+  d.bank_tujuan=g(/beneficiary bank\s*[:\-]?\s*(.+)/i);
+  d.acquirer=g(/acquirer\s*[:\-]?\s*(\S+)/i);
+  d.no_referensi=g(/(?:ref(?:erence)?\.?\s*id|rrn)\s*[:\-]?\s*([A-Za-z0-9]+)/i);
+  const b=t.match(/biaya admin\s*(?:Rp|IDR)?\s*(\d[\d.,]*)/i);
+  d.biaya_admin=b?angka(b[1]):"";
+  d.jenis=/qris/i.test(t)?"qris":"transfer";
+  d.tipe=/dana masuk|transfer masuk|incoming|received|diterima/i.test(t)?"masuk":"keluar";
+  d.bank_asal=/wondr/i.test(t)?"BNI":/BCA/i.test(t)?"BCA":/livin/i.test(t)?"Mandiri":/brimo/i.test(t)?"BRI":/jago/i.test(t)?"Jago":/seabank/i.test(t)?"SeaBank":"";
+  d.berhasil=/berhasil|success/i.test(t);
+  return d;
+}
+
+function tampil(d){
+  F.forEach(([k])=>$("f_"+k).value=d[k]??"");
+  $("f_jenis").value=d.jenis; $("f_tipe").value=d.tipe; $("f_kategori").value="";
+  const w=[];
+  if(!d.nominal||!d.tanggal) w.push("Nominal atau tanggal belum terbaca. Isi manual.");
+  if(Number(d.nominal)>=1000000) w.push("Nominal besar. Periksa ulang angkanya.");
+  if(kyk<0.7) w.push("Kualitas bacaan rendah. Periksa semua kolom.");
+  if(!d.berhasil) w.push("Status berhasil tidak terdeteksi. Pastikan transaksinya sukses.");
+  $("warn").textContent=w.join(" ");
+  $("form").hidden=false;
+}
+
+$("img").onchange=async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  $("form").hidden=true; $("raw").hidden=true; $("st").textContent="Menyiapkan pembaca teks...";
+  try{
+    const r=await Tesseract.recognize(f,"eng",{logger:m=>{if(m.status==="recognizing text")$("st").textContent="Membaca gambar "+Math.round(m.progress*100)+"%"}});
+    kyk=Math.round(r.data.confidence)/100;
+    $("rt").textContent=r.data.text; $("raw").hidden=false;
+    tampil(parse(r.data.text));
+    $("st").textContent="Periksa hasilnya, pilih kategori, lalu simpan.";
+  }catch(err){$("st").textContent="Gagal membaca gambar. Coba screenshot yang lebih jelas."}
+};
+
+$("save").onclick=async()=>{
+  const url=$("url").value.trim(), tok=$("tok").value;
+  if(!url||!tok){$("st").textContent="Isi URL Apps Script dan kode rahasia di Pengaturan.";$("set").open=true;return}
+  const p={token:tok,keyakinan:kyk};
+  [...F.map(x=>x[0]),"jenis","tipe","kategori"].forEach(k=>p[k]=$("f_"+k).value.trim());
+  p.nominal=Number(p.nominal.replace(/\D/g,""));
+  if(p.biaya_admin!=="") p.biaya_admin=Number(p.biaya_admin.replace(/\D/g,""));
+  if(!p.kategori||!p.nominal||!/^\d{4}-\d{2}-\d{2}$/.test(p.tanggal)){$("st").textContent="Lengkapi tanggal, nominal, dan kategori dulu.";return}
+  $("save").disabled=true; $("st").textContent="Menyimpan...";
+  try{
+    const j=await (await fetch(url,{method:"POST",body:JSON.stringify(p)})).json();
+    if(j.ok){$("st").textContent="Tersimpan ke Google Sheets.";$("form").hidden=true;$("raw").hidden=true;$("img").value=""}
+    else $("st").textContent=j.error||"Gagal menyimpan.";
+  }catch(err){$("st").textContent="Tidak bisa memastikan hasilnya. Cek spreadsheet sebelum mencoba lagi."}
+  $("save").disabled=false;
+};
+</script>
+</body>
+</html>
